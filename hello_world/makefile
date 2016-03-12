@@ -8,4 +8,4 @@ hello_world.o: hello_world.c
 	$(CC) $(CFLAGS) hello_world.c
 
 clean:
-	rm *o hello_world
+	rm -f *o hello_world

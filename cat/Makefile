@@ -8,4 +8,4 @@ cat.o: cat.c
 	$(CC) $(CFLAGS) cat.c
 
 clean:
-	rm *o cat
+	rm -f *o cat
