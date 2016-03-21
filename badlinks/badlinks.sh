@@ -3,7 +3,7 @@
 DIR="$1/*"
 TIME="+7"
 
-FILES=`find $DIR -ctime $TIME`
+FILES=`find $DIR -mtime $TIME`
 
 for f in $FILES
 do
