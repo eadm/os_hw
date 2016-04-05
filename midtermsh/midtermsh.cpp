@@ -59,9 +59,6 @@ char ** split(char * buff, int n, int *& offsets, char d, int& length, int endin
             offs = t_offs;
         }
         
-        
-//        printf("offs: %d \n", offset);
-        
         tmp[length] = (char*) malloc (sizeof(char) * offset);
         offs[length] = offset;
         memcpy(tmp[length++], buff + i, offset - 1 + ending);
@@ -78,10 +75,15 @@ char ** split(char * buff, int n, int *& offsets, char d, int& length, int endin
 int pid = 0;
 int running = 0;
 
-int execute(char ** commands, int length) {
+//int pipes[2];
+
+int execute(char ** commands, int length, int pos) {
     pid = fork();
     if(pid == 0) {
-        printf("ex: %d\n", execvp(commands[0], commands));
+//        if (pos == length - 1) {
+//            dup2(pipes[0], STDOUT_FILENO);
+//        }
+        execvp(commands[0], commands);
         return 0;
     } else {
         running = 1;
@@ -97,18 +99,23 @@ int execute(char ** commands, int length) {
 }
 
 void handler(int s) {
+    if (s != SIGINT) return;
+    
     if (running == 1) {
         kill(pid, SIGINT);
     } else {
-        exit(0);
+//        exit(0);
     }
 }
 
 int main() {
     const int buff_size = 1024;
     
-    struct sigaction sa;
-    sigaction(SIGINT, &sa, NULL);
+    signal(SIGINT, &handler);
+    
+//    struct sigaction sa;
+//    sa.sa_handler = &handler;
+//    sigaction(SIGINT, &sa, NULL);
     
     char* buff = (char*)malloc(sizeof(char) * buff_size);
     
@@ -120,6 +127,15 @@ int main() {
     char* line;
     
     while ((r = read(STDIN_FILENO, buff, buff_size)) != 0) {
+        
+        if (r == -1) {
+            if (errno == EINTR) {
+                continue;
+            } else {
+                break;
+            }
+        }
+        
         
         // reading long commmands
         char* line_t = (char*) malloc (sizeof(char) * (line_length + r));
@@ -139,14 +155,26 @@ int main() {
         char ** pipers = split(line, line_length, lens, '|', pipers_len, 0);
 
         
+//        pipe(pipes);
         for (int i = 0; i < pipers_len; i++) {
             int *__ss;
             int length = 0;
             
+//            if (i != pipers_len - 1) {
+//                dup2(pipes[0], STDOUT_FILENO);
+//            } else {
+//                dup2(1, STDOUT_FILENO);
+//            }
+            
             char ** command = split(pipers[i], lens[i], __ss, ' ', length, 1);
-            execute(command, length);
+            execute(command, length, i);
             free(__ss);
             free(pipers[i]);
+            
+//            if (i != 0) {
+//                dup2(pipes[1], STDIN_FILENO);
+//            }
+//            dup2(pipes[0], STDOUT_FILENO);
         }
         free(pipers);
         
