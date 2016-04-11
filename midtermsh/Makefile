@@ -1,5 +1,5 @@
-CC=gcc
-CFLAGS = -c -Wall
+CC=g++
+CFLAGS = -c -Wall -std=c++11
 
 midtermsh: midtermsh.o
 	$(CC) midtermsh.o -o midtermsh
