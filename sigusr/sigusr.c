@@ -2,7 +2,7 @@
 #include <unistd.h>
 #include <signal.h>
 
-void handler(int s, struct __siginfo * sinfo, void * v) {
+void handler(int s, siginfo_t * sinfo, void * v) {
 	switch(s) {
 		case SIGUSR1:
 			printf("SIGUSR1");
