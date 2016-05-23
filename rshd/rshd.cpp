@@ -64,7 +64,10 @@ int main(int argc, char** argv) {
         return -1;
     }
 
-
+    int flags;
+    flags = fcntl (socket_fd, F_GETFL, 0);
+    flags |= O_NONBLOCK;
+    fcntl (socket_fd, F_SETFL, flags);
 
     printf("Waiting on port: %d\n", port);
 
