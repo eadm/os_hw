@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <netinet/in.h>
 #include <unistd.h>
+#include <sys/event.h>
 
 //using namespace std;
 
@@ -27,6 +28,84 @@ int* create_pty() {
     tmp[1] = pty_fd;
 
     return tmp;
+}
+
+int add_client() {
+    auto pty = create_pty();
+
+    int child = fork();
+    if (child == 0) {
+        dup2(pty[0], STDIN_FILENO);
+        dup2(pty[0], STDOUT_FILENO);
+        dup2(pty[0], STDERR_FILENO);
+
+        close(pty[0]);
+        close(pty[1]);
+
+        handle_error(execlp("sh", "sh"), "execlp");
+        return -1;
+    } else {
+        close(pty[0]);
+        return pty[1];
+    }
+}
+
+void main_loop(int kq, int socket_fd) {
+
+    const size_t  BUFFER_LEN = 1024;
+    char buffer[BUFFER_LEN];
+
+//    printf("Event %d\n", kq);
+
+    struct sockaddr_in client;
+    socklen_t client_len;
+
+    struct kevent evSet;
+    struct kevent evList[32];
+    int events;
+
+    while (1) {
+        events = kevent(kq, NULL, 0, evList, 32, NULL);
+        if (events < 1) break;
+
+//        printf("events: %d\n", nev);
+        for (int i = 0; i < events; i++) {
+            if (evList[i].flags & EV_EOF) { // disconnect
+                auto fd = evList[i].ident;
+                EV_SET(&evSet, fd, EVFILT_READ, EV_DELETE, 0, 0, NULL);
+                kevent(kq, &evSet, 1, NULL, 0, NULL);
+
+
+                printf("Disconnect\n");
+            } else if (evList[i].ident == socket_fd) { // connect new one
+
+                printf("New connection\n");
+                int client_fd = accept(socket_fd, (sockaddr*) &client, &client_len);
+
+                int pty_fd = add_client();
+                int* t1 = new int[3];
+                t1[0] = 0;
+                t1[1] = pty_fd;
+                t1[2] = -1;
+
+                EV_SET(&evSet, client_fd, EVFILT_READ, EV_ADD, 0, 0, (void *)t1);
+                kevent(kq, &evSet, 1, NULL, 0, NULL); // add client
+
+                int* t2 = new int[3];
+                t2[0] = 1;
+                t2[1] = client_fd;
+                t2[2] = -1;
+                EV_SET(&evSet, pty_fd, EVFILT_READ, EV_ADD, 0, 0, (void *)t2);
+                kevent(kq, &evSet, 1, NULL, 0, NULL); // add pty
+
+            } else if (evList[i].flags & EVFILT_READ) {
+//                printf("Read %d [%d, %d]\n", (int)evList[i].ident, ((int*)evList[i].udata)[0], ((int*)evList[i].udata)[1]);
+                ssize_t x = read((int)evList[i].ident, buffer, BUFFER_LEN);
+                write(((int*)evList[i].udata)[1], buffer, x);
+//                printf(buffer);
+            }
+        }
+    }
 }
 
 int main(int argc, char** argv) {
@@ -64,56 +143,19 @@ int main(int argc, char** argv) {
         return -1;
     }
 
-    int flags;
-    flags = fcntl (socket_fd, F_GETFL, 0);
-    flags |= O_NONBLOCK;
-    fcntl (socket_fd, F_SETFL, flags);
+    int kq = kqueue();
+    handle_error(kq, "kqueue");
+    struct kevent evSet;
+    int* data = new int[2];
+    data[0] = 5;
+    data[1] = 5;
+    EV_SET(&evSet, socket_fd, EVFILT_READ, EV_ADD, 0, 0, (void*)data);
+//    printf("Event %d\n", (int)evSet.ident);
+    handle_error(kevent(kq, &evSet, 1, NULL, 0, NULL), "kevent(socket_fd)");
 
     printf("Waiting on port: %d\n", port);
 
-    int client_fd;
-    while ((client_fd = accept(socket_fd, (sockaddr*) &client, &client_len)) != -1) {
-        auto pty = create_pty();
-
-        int child = fork();
-        if (child == 0) {
-            dup2(pty[0], STDIN_FILENO);
-            dup2(pty[0], STDOUT_FILENO);
-            dup2(pty[0], STDERR_FILENO);
-
-            close(pty[0]);
-            close(pty[1]);
-
-            handle_error(execlp("sh", "sh"), "execlp");
-        } else {
-            fcntl(client_fd, F_SETFL, O_NONBLOCK);
-            fcntl(pty[1], F_SETFL, O_NONBLOCK);
-
-            ssize_t i = 0;
-            while (1) {
-                i = read(client_fd, buffer, BUFFER_LEN);
-                if (i != -1) {
-                    write(pty[1], buffer, i);
-                }
-                if (i == 0) break;
-
-                i = read(pty[1], buffer, BUFFER_LEN);
-                if (i != -1) {
-                    write(client_fd, buffer, i);
-                }
-                if (i == 0) break;
-            }
-
-            close(client_fd);
-            close(pty[0]);
-            close(pty[1]);
-        }
-    }
-
-
-    int state;
-    while (wait(&state) > 0) {}
-
+    main_loop(kq, socket_fd);
     close(socket_fd);
     return 0;
 }
