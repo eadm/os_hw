@@ -8,8 +8,11 @@
 #include <sys/event.h>
 #include <vector>
 #include <map>
+#include <signal.h>
 
 //using namespace std;
+
+const bool echo = false;
 
 void handle_error(int res, const char* err) {
     if (res == -1) perror(err);
@@ -174,12 +177,17 @@ private:
         unreg(fd1);
         unreg(fd2);
 
-        printf("Disconnect %d %d\n", fd1, fd2);
+        if (echo) printf("Disconnect %d %d\n", fd1, fd2);
     }
 
     void unreg(int fd) {
         remove_listener(fd, EVFILT_READ);
         remove_listener(fd, EVFILT_WRITE);
+
+        if (pid_map.count(fd) != 0) {
+            kill(pid_map[fd], SIGKILL);
+            pid_map.erase(fd);
+        }
 
         delete buffers[fd];
         buffers.erase(fd);
@@ -190,7 +198,7 @@ private:
         reg(client_fd, pty_fd);
         reg(pty_fd, client_fd);
 
-        printf("New connection pty[%d] client[%d]\n", pty_fd, client_fd);
+        if (echo) printf("New connection pty[%d] client[%d]\n", pty_fd, client_fd);
     }
 
     void reg(int from, int to) {
@@ -264,7 +272,7 @@ int main(int argc, char** argv) {
         return -1;
     }
 
-    printf("Waiting on port: %d\n", port);
+    if (echo) printf("Waiting on port: %d\n", port);
 
     rshd rshd_server(socket_fd);
     rshd_server.start();
