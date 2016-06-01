@@ -76,8 +76,6 @@ int add_client(std::map<int, pid_t>& pid_map) {
 struct smart_buffer {
     char* buff;
     size_t BUFFER_LEN;
-
-    bool filled = false, listened = false;
     size_t offset, len;
 
     smart_buffer(size_t len): BUFFER_LEN(len), offset(0), len(0) {
@@ -87,7 +85,12 @@ struct smart_buffer {
     void reset() {
         offset = 0;
         len = 0;
-        filled = false;
+    }
+
+    void set(const char* data, size_t length) {
+        memcpy(buff, data, length);
+        offset = 0;
+        len = length;
     }
 
     ~smart_buffer() {
@@ -97,9 +100,8 @@ struct smart_buffer {
 
 class rshd {
 public:
-    rshd(int socket): socket_fd(socket) {
-        kq = kqueue();
-        add_listener(socket_fd, EVFILT_READ, NULL);
+    rshd(int socket): kq(kqueue()), socket_fd(socket) {
+        add_listener(socket_fd, EVFILT_READ);
     }
 
     void start() {
@@ -108,64 +110,60 @@ public:
             if (events < 1) break;
 
             for (int i = 0; i < events; i++) {
+                int fd = (int)evList[i].ident;
+
                 if (evList[i].flags & EV_EOF) {
-                    int fd1 = (int)evList[i].ident;
-                    int fd2 = destinations[fd1];
-                    disconnect(fd1, fd2);
-                } else if (evList[i].ident == socket_fd) { // connect new one
+                    if (!pty_map[fd]){
+                        buffers[destinations[fd]]->set("exit\n", 5); // send exit to tty
+
+                        change_listener(destinations[fd], EVFILT_WRITE, EV_ENABLE);
+                        remove_listener(fd, EVFILT_READ);
+                    }
+                } else if (fd == socket_fd) { // connect new one
                     int client_fd = accept(socket_fd, (sockaddr*) &client, &client_len);
                     int pty_fd = add_client(pid_map);
 
+                    pty_map[pty_fd] = true;
+                    pty_map[client_fd] = false;
+
                     connect(client_fd, pty_fd);
-                } else if (evList[i].flags & EVFILT_READ) {
-                    int* data = (int*)evList[i].udata;
-                    int fd = (int)evList[i].ident;
-
-                    if (data[0] == 3) {
-                        write_fd(fd);
-                    } else {
-                        read_fd(fd);
-                    }
+                } else if (evList[i].filter == EVFILT_WRITE) {
+                    write_fd(fd);
+                } else if (evList[i].filter == EVFILT_READ) {
+                    read_fd(fd);
                 }
-
             }
-
         }
     }
 private:
     int kq, socket_fd;
 
     void read_fd(int fd) {
-        if (buffers[destinations[fd]]->filled) { // if targeted buffer filled wait for it
-            return;
-        }
-
         ssize_t x = read(fd, buffers[destinations[fd]]->buff, BUFFER_LEN); // read to target buffer
-        if (x != -1) {
+        if (x > 0) {
             buffers[destinations[fd]]->offset = 0;
             buffers[destinations[fd]]->len = (size_t)x;
-            buffers[destinations[fd]]->filled = true;
+
+            change_listener(destinations[fd], EVFILT_WRITE, EV_ENABLE);
+            change_listener(fd, EVFILT_READ, EV_DISABLE);
         }
 
-        if (!buffers[destinations[fd]]->listened) {
-            int* data = new int[1];
-            data[0] = 3; //state
+        if (x == 0 && pty_map[fd]) {
+            int fd1 = fd;
+            int fd2 = destinations[fd1];
 
-            add_listener(destinations[fd], EVFILT_WRITE, data);
-            buffers[destinations[fd]]->listened = true;
+            disconnect(fd1, fd2);
         }
     }
 
     void write_fd(int fd) {
-        if (!buffers[fd]->filled) {
-            return;
-        }
         ssize_t x = write(fd, buffers[fd]->buff + buffers[fd]->offset, buffers[fd]->len);
         if (x != -1) {
             if (x == buffers[fd]->len) {
                 buffers[fd]->reset();
-                remove_listener(fd, EVFILT_WRITE);
-                buffers[fd]->listened = false;
+
+                change_listener(destinations[fd], EVFILT_READ, EV_ENABLE);
+                change_listener(fd, EVFILT_WRITE, EV_DISABLE);
             } else {
                 buffers[fd]->len -= x;
                 buffers[fd]->offset += x;
@@ -177,6 +175,8 @@ private:
         unreg(fd1);
         unreg(fd2);
 
+        close(fd1);
+        close(fd2);
         if (echo) printf("Disconnect %d %d\n", fd1, fd2);
     }
 
@@ -185,13 +185,15 @@ private:
         remove_listener(fd, EVFILT_WRITE);
 
         if (pid_map.count(fd) != 0) {
-            kill(pid_map[fd], SIGKILL);
+            kill(pid_map[fd], SIGTERM);
+            waitpid(pid_map[fd], 0, 0); // wait for zombie
             pid_map.erase(fd);
         }
 
         delete buffers[fd];
         buffers.erase(fd);
         destinations.erase(fd);
+        pty_map.erase(fd);
     }
 
     void connect(int client_fd, int pty_fd) {
@@ -206,13 +208,19 @@ private:
         buffers[to] = buf;
         destinations[from] = to;
 
-        int* data = new int[1];
-        data[0] = 1;
-        add_listener(from, EVFILT_READ, data);
+        add_listener(from, EVFILT_READ);
+        add_listener(from, EVFILT_WRITE);
+        change_listener(from, EVFILT_WRITE, EV_DISABLE);
     }
 
-    int add_listener(int fd, int type, void* data) {
-        EV_SET(&evSet, fd, type, EV_ADD, 0, 0, data);
+
+    int change_listener(int fd, int type, int state) {
+        EV_SET(&evSet, fd, type, state, 0, 0, NULL);
+        return kevent(kq, &evSet, 1, NULL, 0, NULL);
+    }
+
+    int add_listener(int fd, int type) {
+        EV_SET(&evSet, fd, type, EV_ADD, 0, 0, NULL);
         return kevent(kq, &evSet, 1, NULL, 0, NULL);
     }
 
@@ -235,19 +243,21 @@ private:
     std::map<int, smart_buffer*> buffers; // fd to buffer from its write
 
     std::map<int, pid_t> pid_map;
+
+    std::map<int, bool> pty_map;
 };
 
 
 int main(int argc, char** argv) {
 
-    make_daemon();
+    if (!echo) make_daemon();
     const size_t MAX_CONNECTIONS = 10;
 
     if (argc < 2) {
         perror("Port not specified");
-	return -1;
+        return -1;
     }
-	
+
     int port = atoi(argv[1]);
 
 
